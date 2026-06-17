@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
-import { collection, query, where, onSnapshot } from 'firebase/firestore';
-import { firestore } from '@/config/firebase';
+import { ref, onValue, off } from 'firebase/database';
+import { database } from '@/config/firebase';
 
 export interface MarkerDef {
   id: string;
@@ -77,45 +77,38 @@ export function useActiveTrip(driverId: string | null): UseActiveTripResult {
       return;
     }
 
-    // Same query pattern used elsewhere: orders for this driver that aren't completed
-    const ordersRef = collection(firestore, 'orders');
-    const q = query(
-      ordersRef,
-      where('driverId', '==', driverId),
-      where('status', '!=', 'completed')
-    );
+    // Same path pattern used in dashboard.tsx and IncomingRidesContext.tsx:
+    // RTDB driver_trip_requests/{driverId} keyed by request id
+    const tripRequestsRef = ref(database, `driver_trip_requests/${driverId}`);
 
-    const unsubscribe = onSnapshot(
-      q,
+    const listener = onValue(
+      tripRequestsRef,
       (snapshot) => {
-        if (snapshot.empty) {
+        const data = snapshot.val();
+        if (!data) {
           setActiveTrip(null);
           return;
         }
-        // Pick the first active (non-terminal) order
+        // Pick the first active (non-terminal) request
         const terminal = ['completed', 'cancelled', 'rejected', 'expired'];
-        const docSnap = snapshot.docs.find(
-          (d) => !terminal.includes((d.data() as any).status)
-        );
-        if (docSnap) {
-          setActiveTrip({ id: docSnap.id, ...docSnap.data() });
-        } else {
-          setActiveTrip(null);
-        }
+        const requests = Object.values(data) as any[];
+        const activeRequest = requests.find((r) => !terminal.includes(r?.status)) || null;
+        setActiveTrip(activeRequest);
       },
       (error) => {
-        console.log('[v0] useActiveTrip snapshot error:', error.message);
+        console.log('[v0] useActiveTrip listener error:', error.message);
         setActiveTrip(null);
       }
     );
 
-    return () => unsubscribe();
+    return () => off(tripRequestsRef, 'value', listener);
   }, [driverId]);
 
   const tripStatus: string | null = activeTrip?.status ?? null;
-  const workflowType: WorkflowType | null = activeTrip?.workflowType ?? null;
-  const polylineToPickup: string | null = activeTrip?.polylineToPickup ?? null;
-  const polylineToDestination: string | null = activeTrip?.polylineToDestination ?? null;
+  const workflowType: WorkflowType | null =
+    activeTrip?.workflowType ?? activeTrip?.requestType ?? null;
+  const polylineToPickup: string | null = activeTrip?.driverToPickupEncodedPolyline ?? null;
+  const polylineToDestination: string | null = activeTrip?.encodedPolyline ?? null;
 
   // Compute markers and active polyline based on status + workflow
   let markers: MarkerDef[] = [];
